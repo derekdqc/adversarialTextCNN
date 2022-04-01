@@ -28,6 +28,8 @@ tensorboardX
             fgm_against(model, trains, labels)
         elif against == "pgd":
             pgd_against(model, trains, labels)
+        elif against == "freeAT":
+            freeAT_against(model, trains, labels)
 ```
         
 ### 进行对抗训练
@@ -178,7 +180,8 @@ tensorboardX
             self.backup = {}
 ```
 ## 效果
-实验过程中，其他实验参数（batch size, learning rate等）均设置相同，均训练至模型收敛，TextCNN，FGM, PGD效果对比如下：
+实验过程中，其他实验参数（batch size, learning rate等）均设置相同，
+均训练至模型收敛，TextCNN，FGM, PGD, FreeAT效果对比如下：
 
 
 | 模型 | acc | recall | f1 |
@@ -219,4 +222,5 @@ python run.py --model TextRNN --adversarial freeAT
 
 ## 对应论文
 [1] Convolutional Neural Networks for Sentence Classification.
+
 [2] Fast is better than free: Revisiting adversarial training.
