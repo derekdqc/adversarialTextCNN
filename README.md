@@ -1,90 +1,222 @@
-# Chinese-Text-Classification-Pytorch
-[![LICENSE](https://img.shields.io/badge/license-Anti%20996-blue.svg)](https://github.com/996icu/996.ICU/blob/master/LICENSE)
+# 对抗训练实验报告
+基于中文文本分类TextCNN方法，将图像领域的对抗训练技术应用到文本分类任务中。
 
-中文文本分类，TextCNN，TextRNN，FastText，TextRCNN，BiLSTM_Attention, DPCNN, Transformer, 基于pytorch，开箱即用。
-
-## 介绍
-模型介绍、数据流动过程：[我的博客](https://zhuanlan.zhihu.com/p/73176084)  
-
-数据以字为单位输入模型，预训练词向量使用 [搜狗新闻 Word+Character 300d](https://github.com/Embedding/Chinese-Word-Vectors)，[点这里下载](https://pan.baidu.com/s/14k-9jsspp43ZhMxqPmsWMQ)  
+数据以字为单位输入模型，预训练词向量使用 [搜狗新闻 Word+Character 300d](https://github.com/Embedding/Chinese-Word-Vectors)，[点这里下载](https://pan.baidu.com/s/14k-9jsspp43ZhMxqPmsWMQ)
 
 ## 环境
-python 3.7  
-pytorch 1.1  
-tqdm  
-sklearn  
+python 3.7
+pytorch 1.1
+tqdm
+sklearn
 tensorboardX
 
 ## 中文数据集
-我从[THUCNews](http://thuctc.thunlp.org/)中抽取了20万条新闻标题，已上传至github，文本长度在20到30之间。一共10个类别，每类2万条。
-
-类别：财经、房产、股票、教育、科技、社会、时政、体育、游戏、娱乐。
-
+[THUCNews](http://thuctc.thunlp.org/)
 数据集划分：
 
-数据集|数据量
+数据集|数据量（机器限制，条件允许可使用更大数据集实验）
 --|--
-训练集|18万
-验证集|1万
-测试集|1万
+训练集|12800
+验证集|1280
+测试集|1280
 
+## 关键代码
+### 选择对抗方式
+```
+    def train_against(against, model, trains, labels):
+        if against == "fgm":
+            fgm_against(model, trains, labels)
+        elif against == "pgd":
+            pgd_against(model, trains, labels)
+```
+        
+### 进行对抗训练
+#### FGM
+```
+    def fgm_against(model, trains, labels):
+        fgm = FGM(model)
+        fgm.attack(1, "embedding.weight")  # 在embedding上添加对抗扰动
+        outputs = model(trains)
+        loss_adv = F.cross_entropy(outputs, labels)
+        loss_adv.backward()  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+        fgm.restore("embedding.weight")  # 恢复embedding参数
+```
 
-### 更换自己的数据集
- - 如果用字，按照我数据集的格式来格式化你的数据。  
- - 如果用词，提前分好词，词之间用空格隔开，`python run.py --model TextCNN --word True`  
- - 使用预训练词向量：utils.py的main函数可以提取词表对应的预训练词向量。  
+#### PGD
+```
+    def pgd_against(model, trains, labels):
+        pgd = PGD(model)
+        K = 3
+        # 对抗训练
+        pgd.backup_grad()
+        for t in range(K):
+            pgd.attack(is_first_attack=(t == 0), emb_name="embedding.weight")  # 在embedding上添加对抗扰动, first attack时备份param.data
+            if t != K - 1:
+                model.zero_grad()
+            else:
+                pgd.restore_grad()
+            outputs = model(trains)
+            loss_adv = F.cross_entropy(outputs, labels)
+            loss_adv.backward()  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+        pgd.restore(emb_name="embedding.weight")  # 恢复embedding参数
+```
 
+#### FreeAT
+```
+    def freeAT_against(model, trains, labels):
+        free = FreeAT(model)
+        r = 0
+        m_repeat = 2
+        for _ in range(m_repeat):
+            # embedding扰动，并更新r值
+            r = free.attack(r, 1, "embedding.weight")  # 在embedding上添加对抗扰动
+            # print('r = ', r)
+            outputs = model(trains)
+            loss_adv = F.cross_entropy(outputs, labels)
+            loss_adv.backward()  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+        free.restore("embedding.weight")  # 恢复embedding参数
+```
 
+### 对抗模型  
+#### FGM  
+```
+    class FGM():
+        def __init__(self, model):
+            self.model = model
+            self.backup = {}
+        
+        def attack(self, epsilon=1., emb_name='emb.'):
+            # emb_name这个参数要换成你模型中embedding的参数名
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and emb_name in name:
+                    self.backup[name] = param.data.clone()
+                    norm = torch.norm(param.grad)
+                    if norm != 0 and not torch.isnan(norm):
+                        r_at = epsilon * param.grad / norm
+                        param.data.add_(r_at)
+
+        def restore(self, emb_name='emb.'):
+            # emb_name这个参数要换成你模型中embedding的参数名
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and emb_name in name:
+                    assert name in self.backup
+                    param.data = self.backup[name]
+            self.backup = {}
+```
+#### PGD  
+```
+    class PGD():
+        def __init__(self, model):
+            self.model = model
+            self.emb_backup = {}
+            self.grad_backup = {}
+    
+        def attack(self, epsilon=1., alpha=0.3, emb_name='emb.', is_first_attack=False):
+            # emb_name这个参数要换成你模型中embedding的参数名
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and emb_name in name:
+                    if is_first_attack:
+                        self.emb_backup[name] = param.data.clone()
+                    norm = torch.norm(param.grad)
+                    if norm != 0 and not torch.isnan(norm):
+                        r_at = alpha * param.grad / norm
+                        param.data.add_(r_at)
+                        param.data = self.project(name, param.data, epsilon)
+    
+        def restore(self, emb_name='emb.'):
+            # emb_name这个参数要换成你模型中embedding的参数名
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and emb_name in name:
+                    assert name in self.emb_backup
+                    param.data = self.emb_backup[name]
+            self.emb_backup = {}
+    
+        def project(self, param_name, param_data, epsilon):
+            r = param_data - self.emb_backup[param_name]
+            if torch.norm(r) > epsilon:
+                r = epsilon * r / torch.norm(r)
+            return self.emb_backup[param_name] + r
+    
+        def backup_grad(self):
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    # print('name: ', name)
+                    self.grad_backup[name] = param.grad.clone()
+    
+        def restore_grad(self):
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    param.grad = self.grad_backup[name]
+```
+#### FreeAT  
+```
+    class FreeAT():
+        def __init__(self, model):
+            self.model = model
+            self.backup = {}
+    
+        def attack(self, r, epsilon=1., emb_name='emb.'):
+            # emb_name这个参数要换成你模型中embedding的参数名
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and emb_name in name:
+                    # print('param before: ', param)
+                    self.backup[name] = param.data.clone()
+                    norm = torch.norm(param.grad)
+                    if norm != 0 and not torch.isnan(norm):
+                        # r_at = epsilon * param.grad / norm
+                        # param.data.add_(r_at)
+                        r = r + epsilon * param.grad / norm
+                        param.data.add_(r)
+            return r
+    
+        def restore(self, emb_name='emb.'):
+            # emb_name这个参数要换成你模型中embedding的参数名
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and emb_name in name:
+                    assert name in self.backup
+                    param.data = self.backup[name]
+            self.backup = {}
+```
 ## 效果
+实验过程中，其他实验参数（batch size, learning rate等）均设置相同，均训练至模型收敛，TextCNN，FGM, PGD效果对比如下：
 
-模型|acc|备注
---|--|--
-TextCNN|91.22%|Kim 2014 经典的CNN文本分类
-TextRNN|91.12%|BiLSTM 
-TextRNN_Att|90.90%|BiLSTM+Attention
-TextRCNN|91.54%|BiLSTM+池化
-FastText|92.23%|bow+bigram+trigram， 效果出奇的好
-DPCNN|91.25%|深层金字塔CNN
-Transformer|89.91%|效果较差
-bert|94.83%|bert + fc  
-ERNIE|94.61%|比bert略差(说好的中文碾压bert呢)  
 
-bert和ERNIE模型代码我放到另外一个仓库了，传送门：[Bert-Chinese-Text-Classification-Pytorch](https://github.com/649453932/Bert-Chinese-Text-Classification-Pytorch)，后续还会搞一些bert之后的东西，欢迎star。  
+| 模型 | acc | recall | f1 |
+|---|---|---|---|
+|TextCNN|0.8398|0.83984|0.83928
+|TextCNN + FGM|0.8461|0.8461|0.84612
+|TextCNN + PGD|0.8461|0.8461|0.8459
+|TextCNN + FreeAT|
+
+- TextCNN
+
+![textcnn](./results/textcnn.png)
+
+- TextCNN + FGM
+
+![fgm](./results/textcnn+fgm.png)
+
+- TextCNN + PGD
+
+![pgd](./results/textcnn+pgd.png)
+
+- TextCNN + freeAT
+
+![freeAT](./results/textcnn+freeAT.png)
 
 ## 使用说明
 ```
 # 训练并测试：
-# TextCNN
-python run.py --model TextCNN
+这里加入不同对抗方法接口
+python run.py --model TextCNN --adversarial fgm
 
-# TextRNN
-python run.py --model TextRNN
+# PGD
+python run.py --model TextRNN --adversarial pgd
 
-# TextRNN_Att
-python run.py --model TextRNN_Att
-
-# TextRCNN
-python run.py --model TextRCNN
-
-# FastText, embedding层是随机初始化的
-python run.py --model FastText --embedding random 
-
-# DPCNN
-python run.py --model DPCNN
-
-# Transformer
-python run.py --model Transformer
+# freeAT
+python run.py --model TextRNN --adversarial freeAT
 ```
 
-### 参数
-模型都在models目录下，超参定义和模型定义在同一文件中。  
-
-
 ## 对应论文
-[1] Convolutional Neural Networks for Sentence Classification  
-[2] Recurrent Neural Network for Text Classification with Multi-Task Learning  
-[3] Attention-Based Bidirectional Long Short-Term Memory Networks for Relation Classification  
-[4] Recurrent Convolutional Neural Networks for Text Classification  
-[5] Bag of Tricks for Efficient Text Classification  
-[6] Deep Pyramid Convolutional Neural Networks for Text Categorization  
-[7] Attention Is All You Need  
+[1] Convolutional Neural Networks for Sentence Classification.
+[2] Fast is better than free: Revisiting adversarial training.

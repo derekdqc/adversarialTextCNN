@@ -5,6 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn import metrics
 import time
+
+from models.FGM import FGM
+from models.FreeAT import FreeAT
+from models.PGD import PGD
 from utils import get_time_dif
 from tensorboardX import SummaryWriter
 
@@ -26,7 +30,7 @@ def init_network(model, method='xavier', exclude='embedding', seed=123):
                 pass
 
 
-def train(config, model, train_iter, dev_iter, test_iter):
+def train(config, model, train_iter, dev_iter, test_iter, against=None, result_file=None):
     start_time = time.time()
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
@@ -39,15 +43,22 @@ def train(config, model, train_iter, dev_iter, test_iter):
     flag = False  # 记录是否很久没有效果提升
     writer = SummaryWriter(log_dir=config.log_path + '/' + time.strftime('%m-%d_%H.%M', time.localtime()))
     for epoch in range(config.num_epochs):
-        print('Epoch [{}/{}]'.format(epoch + 1, config.num_epochs))
+        print('Epoch [{}/{}]'.format(epoch + 1, config.num_epochs), flush=True)
         # scheduler.step() # 学习率衰减
         for i, (trains, labels) in enumerate(train_iter):
+            start1 = time.time()
             outputs = model(trains)
             model.zero_grad()
             loss = F.cross_entropy(outputs, labels)
+            # print(loss)
             loss.backward()
+            # print("model_time=" + str(time.time() - start1), flush=True)
+            # 開始對抗訓練
+            start2 = time.time()
+            train_against(against, model, trains, labels)
+            # print("model_against_time=" + str(time.time() - start2), flush=True)
             optimizer.step()
-            if total_batch % 100 == 0:
+            if total_batch % 10 == 0:
                 # 每多少轮输出在训练集和验证集上的效果
                 true = labels.data.cpu()
                 predic = torch.max(outputs.data, 1)[1].cpu()
@@ -62,7 +73,8 @@ def train(config, model, train_iter, dev_iter, test_iter):
                     improve = ''
                 time_dif = get_time_dif(start_time)
                 msg = 'Iter: {0:>6},  Train Loss: {1:>5.2},  Train Acc: {2:>6.2%},  Val Loss: {3:>5.2},  Val Acc: {4:>6.2%},  Time: {5} {6}'
-                print(msg.format(total_batch, loss.item(), train_acc, dev_loss, dev_acc, time_dif, improve))
+                print(msg.format(total_batch, loss.item(), train_acc, dev_loss, dev_acc, time_dif, improve), flush=True)
+                result_file.write(msg.format(total_batch, loss.item(), train_acc, dev_loss, dev_acc, time_dif, improve))
                 writer.add_scalar("loss/train", loss.item(), total_batch)
                 writer.add_scalar("loss/dev", dev_loss, total_batch)
                 writer.add_scalar("acc/train", train_acc, total_batch)
@@ -77,10 +89,60 @@ def train(config, model, train_iter, dev_iter, test_iter):
         if flag:
             break
     writer.close()
-    test(config, model, test_iter)
+    test(config, model, test_iter, result_file)
 
 
-def test(config, model, test_iter):
+def train_against(against, model, trains, labels):
+    if against == "fgm":
+        fgm_against(model, trains, labels)
+    elif against == "pgd":
+        pgd_against(model, trains, labels)
+    elif against == "freeAT":
+        freeAT_against(model, trains, labels)
+
+
+def pgd_against(model, trains, labels):
+    pgd = PGD(model)
+    K = 3
+    # 对抗训练
+    pgd.backup_grad()
+    for t in range(K):
+        pgd.attack(is_first_attack=(t == 0), emb_name="embedding.weight")  # 在embedding上添加对抗扰动, first attack时备份param.data
+        if t != K - 1:
+            model.zero_grad()
+        else:
+            pgd.restore_grad()
+        outputs = model(trains)
+        loss_adv = F.cross_entropy(outputs, labels)
+        loss_adv.backward()  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+    pgd.restore(emb_name="embedding.weight")  # 恢复embedding参数
+
+
+def fgm_against(model, trains, labels):
+    fgm = FGM(model)
+    fgm.attack(1, "embedding.weight")  # 在embedding上添加对抗扰动
+    outputs = model(trains)
+    loss_adv = F.cross_entropy(outputs, labels)
+    loss_adv.backward()  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+    fgm.restore("embedding.weight")  # 恢复embedding参数
+
+
+def freeAT_against(model, trains, labels):
+    free = FreeAT(model)
+    r = 0
+    m_repeat = 2
+    for _ in range(m_repeat):
+        # embedding扰动，并更新r值
+        r = free.attack(r, 1, "embedding.weight")  # 在embedding上添加对抗扰动
+        # print('r = ', r)
+        outputs = model(trains)
+        loss_adv = F.cross_entropy(outputs, labels)
+        loss_adv.backward()  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+
+    free.restore("embedding.weight")  # 恢复embedding参数
+
+
+def test(config, model, test_iter, result_file):
     # test
     model.load_state_dict(torch.load(config.save_path))
     model.eval()
@@ -88,12 +150,16 @@ def test(config, model, test_iter):
     test_acc, test_loss, test_report, test_confusion = evaluate(config, model, test_iter, test=True)
     msg = 'Test Loss: {0:>5.2},  Test Acc: {1:>6.2%}'
     print(msg.format(test_loss, test_acc))
+    result_file.write(msg.format(test_loss, test_acc))
     print("Precision, Recall and F1-Score...")
+    result_file.write("Precision, Recall and F1-Score...")
     print(test_report)
+    result_file.write(test_report)
     print("Confusion Matrix...")
     print(test_confusion)
     time_dif = get_time_dif(start_time)
     print("Time usage:", time_dif)
+    result_file.write("Time usage:" + str(time_dif))
 
 
 def evaluate(config, model, data_iter, test=False):
