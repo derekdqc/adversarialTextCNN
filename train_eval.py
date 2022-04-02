@@ -129,11 +129,10 @@ def fgm_against(model, trains, labels):
 
 def freeAT_against(model, trains, labels):
     free = FreeAT(model)
-    r = 0
     m_repeat = 2
     for _ in range(m_repeat):
         # embedding扰动，并更新r值
-        r = free.attack(r, 1, "embedding.weight")  # 在embedding上添加对抗扰动
+        free.attack(1, "embedding.weight")  # 在embedding上添加对抗扰动
         # print('r = ', r)
         outputs = model(trains)
         loss_adv = F.cross_entropy(outputs, labels)

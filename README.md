@@ -67,15 +67,15 @@ tensorboardX
 ```
     def freeAT_against(model, trains, labels):
         free = FreeAT(model)
-        r = 0
         m_repeat = 2
         for _ in range(m_repeat):
             # embedding扰动，并更新r值
-            r = free.attack(r, 1, "embedding.weight")  # 在embedding上添加对抗扰动
+            free.attack(1, "embedding.weight")  # 在embedding上添加对抗扰动
             # print('r = ', r)
             outputs = model(trains)
             loss_adv = F.cross_entropy(outputs, labels)
             loss_adv.backward()  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+    
         free.restore("embedding.weight")  # 恢复embedding参数
 ```
 
@@ -165,10 +165,8 @@ tensorboardX
                     self.backup[name] = param.data.clone()
                     norm = torch.norm(param.grad)
                     if norm != 0 and not torch.isnan(norm):
-                        # r_at = epsilon * param.grad / norm
-                        # param.data.add_(r_at)
-                        r = r + epsilon * param.grad / norm
-                        param.data.add_(r)
+                        r_at = epsilon * param.grad / norm
+                        param.data.add_(r_at) 
             return r
     
         def restore(self, emb_name='emb.'):
@@ -183,13 +181,17 @@ tensorboardX
 实验过程中，其他实验参数（batch size, learning rate等）均设置相同，
 均训练至模型收敛，TextCNN，FGM, PGD, FreeAT效果对比如下：
 
-
 | 模型 | acc | recall | f1 |
 |---|---|---|---|
 |TextCNN|0.8398|0.83984|0.83928
 |TextCNN + FGM|0.8461|0.8461|0.84612
-|TextCNN + PGD|0.8461|0.8461|0.8459
-|TextCNN + FreeAT|
+|TextCNN + PGD|0.8471|0.8461|0.8459
+|TextCNN + FreeAT|0.6057|0.5945|0.5896
+
+加入FGM，PGD后对抗训练整体效果均好于baseline，FreeAT方法问题
+在于每次的r对于当前的参数都是次优的（无法最大化loss），
+因为当前r是由r(t-1)和theta(t-1)计算出来的，是对于theta(t-1)的最优，
+论文也只给出了伪代码，效果需要进一步研究。
 
 - TextCNN
 

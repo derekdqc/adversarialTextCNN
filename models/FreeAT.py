@@ -47,7 +47,7 @@ class FreeAT():
         self.model = model
         self.backup = {}
 
-    def attack(self, r, epsilon=1., emb_name='emb.'):
+    def attack(self, epsilon=1., emb_name='emb.'):
         # emb_name这个参数要换成你模型中embedding的参数名
         for name, param in self.model.named_parameters():
             if param.requires_grad and emb_name in name:
@@ -55,11 +55,8 @@ class FreeAT():
                 self.backup[name] = param.data.clone()
                 norm = torch.norm(param.grad)
                 if norm != 0 and not torch.isnan(norm):
-                    # r_at = epsilon * param.grad / norm
-                    # param.data.add_(r_at)
-                    r = r + epsilon * param.grad / norm
-                    param.data.add_(r)
-        return r
+                    r_at = epsilon * param.grad / norm
+                    param.data.add_(r_at)
 
     def restore(self, emb_name='emb.'):
         # emb_name这个参数要换成你模型中embedding的参数名
